@@ -1,0 +1,308 @@
+RELIABLE FLOW CONTROL PROTOCOL OVER UDP (KTP)
+
+1. DATA STRUCTURES
+
+1.1 ktp_packet
+
+Defines the packet format used for communication
+
+┌──────────────┬──────────────┬──────────────────────────────────────────────┐
+│ Field        │ Type         │ Description                                  │
+├──────────────┼──────────────┼──────────────────────────────────────────────┤
+│ seq_no       │ uint8_t      │ Sequence number of the packet                │
+│ type         │ uint8_t      │ Packet type (DATA / ACK / DUP_ACK)           │
+│ rwnd_size    │ uint8_t      │ Receiver window size (flow control)          │
+│ data         │ char[512]    │ Payload (fixed size message)                 │
+└──────────────┴──────────────┴──────────────────────────────────────────────┘
+
+1.2 ktp_buffer
+
+Circular buffer used for send/receive operations
+
+┌──────────────┬────────────────────────────┬──────────────────────────────────┐
+│ Field        │ Type                       │ Description                      │
+├──────────────┼────────────────────────────┼──────────────────────────────────┤
+│ buffer       │ char[10][512]              │ Storage for messages             │
+│ front        │ uint8_t                    │ Index of first element           │
+│ back         │ uint8_t                    │ Index of next insertion          │
+│ count        │ uint8_t                    │ Number of messages in buffer     │
+└──────────────┴────────────────────────────┴──────────────────────────────────┘
+
+1.3 ktp_swnd (Sender Window)
+
+Maintains sent but unacknowledged packets
+
+┌──────────────┬────────────────────────────┬────────────────────────────────────────────┐
+│ Field        │ Type                       │ Description                                │
+├──────────────┼────────────────────────────┼────────────────────────────────────────────┤
+│ wsize        │ int                        │ Sender window size                         │
+│ seq_nos      │ uint8_t[BUFFER_SIZE]       │ Sequence numbers in window                 │
+│ sent_time    │ struct timeval[]           │ Time when packet was sent                  │
+│ front        │ uint8_t                    │ Start of window                            │
+│ back         │ uint8_t                    │ End of window                              │
+│ count        │ uint8_t                    │ Number of packets in window                │
+│ seq_no       │ uint8_t                    │ Next sequence number to assign             │
+└──────────────┴────────────────────────────┴────────────────────────────────────────────┘
+
+1.4 ktp_rwnd (Receiver Window)
+
+Tracks expected and out-of-order packets
+
+┌──────────────┬────────────────────────────┬────────────────────────────────────────────┐
+│ Field        │ Type                       │ Description                                │
+├──────────────┼────────────────────────────┼────────────────────────────────────────────┤
+│ wsize        │ int                        │ Available buffer space                     │
+│ seq_nos      │ uint8_t[BUFFER_SIZE]       │ Sequence numbers received                  │
+│ has_data     │ uint8_t[BUFFER_SIZE]       │ Flags for out-of-order packets             │
+│ expected_seq │ uint8_t                    │ Next expected sequence number              │
+└──────────────┴────────────────────────────┴────────────────────────────────────────────┘
+
+1.5 ktp_socket
+
+Represents a KTP socket in shared memory
+
+┌──────────────────────┬────────────────────────────┬──────────────────────────────────────────────┐
+│ Field                │ Type                       │ Description                                  │
+├──────────────────────┼────────────────────────────┼──────────────────────────────────────────────┤
+│ is_free              │ int                        │ Availability flag                            │
+│ pid                  │ pid_t                      │ Owner process ID                             │
+│ udp_fd               │ int                        │ Underlying UDP socket                        │
+│ bind_called          │ int                        │ Whether k_bind was called                    │
+│ is_bound             │ int                        │ Whether UDP socket is bound                  │
+│ src_addr             │ sockaddr_in                │ Source address                               │
+│ dest_addr            │ sockaddr_in                │ Destination address                          │
+│ send_buffer          │ ktp_buffer                 │ Outgoing message buffer                      │
+│ recv_buffer          │ ktp_buffer                 │ Incoming message buffer                      │
+│ swnd                 │ ktp_swnd                   │ Sender window                                │
+│ rwnd                 │ ktp_rwnd                   │ Receiver window                              │
+│ no_space             │ int                        │ Flag when receive buffer is full             │
+└──────────────────────┴────────────────────────────┴──────────────────────────────────────────────┘
+
+1.6 union semun
+
+Used for semaphore control operations
+
+┌─────────┬──────────────────────┬──────────────────────────────┐
+│ Field   │ Type                 │ Description                  │
+├─────────┼──────────────────────┼──────────────────────────────┤
+│ val     │ int                  │ Semaphore value              │
+│ buf     │ struct semid_ds*     │ IPC control buffer           │
+│ array   │ unsigned short*      │ Multiple semaphore values    │
+└─────────┴──────────────────────┴──────────────────────────────┘
+
+2. PUBLIC API FUNCTIONS (ksocket.c)
+
+┌──────────────────────────────┬───────────────────────────────────────────────────┐
+│ Function                     │ Description                                       │
+├──────────────────────────────┼───────────────────────────────────────────────────┤
+│ k_socket()                   │ Allocates a KTP socket from shared memory         │
+│ k_bind()                     │ Stores source & destination addresses             │
+│ k_sendto()                   │ Adds message to send buffer                       │
+│ k_recvfrom()                 │ Retrieves message from receive buffer             │
+│ k_close()                    │ Frees the socket                                  │
+└──────────────────────────────┴───────────────────────────────────────────────────┘
+
+3. INTERNAL FUNCTIONS (ksocket.c)
+
+3.1 Shared Memory & Semaphore Handling
+
+┌──────────────────────┬──────────────────────────────────────────────────────────────┐
+│ Function             │ Description                                                  │
+├──────────────────────┼──────────────────────────────────────────────────────────────┤
+│ get_sem_shm()        │ Attaches to shared memory and semaphores                    │
+│ wait_sem()           │ Locks a socket entry                                        │
+│ signal_sem()         │ Unlocks a socket entry                                      │
+└──────────────────────┴──────────────────────────────────────────────────────────────┘
+
+3.2 Utility Functions
+
+┌──────────────────────┬──────────────────────────────────────────────────────────────┐
+│ Function             │ Description                                                  │
+├──────────────────────┼──────────────────────────────────────────────────────────────┤
+│ dropMessage(p)       │ Simulates packet loss with probability p                     │
+└──────────────────────┴──────────────────────────────────────────────────────────────┘
+
+4. PROTOCOL IMPLEMENTATION (initksocket.c)
+
+4.1 Receiver Thread (thread_R)
+
+Handles all incoming packets:
+- Binds UDP sockets lazily after k_bind
+- Uses select() for multiplexing multiple sockets
+- Handles:
+  • DATA packets
+    - In-order → store + slide window + send ACK
+    - Out-of-order → buffer only
+  • ACK/DUP_ACK packets
+    - Slide sender window (cumulative ACK)
+    - Update sender window size
+- Handles no-space condition
+  • Sends DUP_ACK when buffer frees up
+
+4.2 Sender Thread (thread_S)
+
+Responsible for transmission and retransmission:
+- Periodically checks for timeout (T seconds)
+- On timeout:
+  • Retransmits all unacknowledged packets
+- Sends new packets if:
+  • Window has space
+  • Send buffer has data
+
+4.3 Timeout Handling
+
+┌──────────────────────┬──────────────────────────────────────────────────────────────┐
+│ Function             │ Description                                                  │
+├──────────────────────┼──────────────────────────────────────────────────────────────┤
+│ check_timeout()      │ Checks if oldest unacknowledged packet timed out             │
+└──────────────────────┴──────────────────────────────────────────────────────────────┘
+
+4.4 Garbage Collector
+
+- Periodically checks if process is dead
+- Cleans:
+  • UDP socket
+  • Buffers
+  • Window state
+- Marks socket as free
+
+4.5 Main Function
+
+- Initializes shared memory
+- Initializes semaphores
+- Spawns:
+  • Receiver thread
+  • Sender thread
+- Forks garbage collector process
+
+5. PROTOCOL DETAILS
+
+5.1 Packet Format
+Header:
+- Sequence Number (1 byte)
+- Type (1 byte)
+- Receiver Window Size (1 byte)
+
+Payload:
+- 512 bytes
+- Note that the user application has to enforce the payload to be 512 bytes
+
+5.2 Reliability Mechanisms
+- Sequence numbering (mod 256)
+- Cumulative acknowledgments
+- Timeout-based retransmission
+- Duplicate ACK for flow control updates
+
+5.3 Flow Control
+- Sliding window protocol
+- Receiver advertises available buffer space (rwnd)
+- Sender adjusts transmission accordingly
+
+6. FINDINGS
+
+File Size Used: 112.5KB
+No. of messages generated: (112500)/512 + 1(EOF) = 221
+Timeout: 5 seconds
+
+┌──────────────────────┬────────────────────────────┬────────────────────────────────────────────────────┐
+│ Drop probability (p) │ No. of DATA transmissions  │ Avg no. of transmissions made to send each message │
+├──────────────────────┼────────────────────────────┼────────────────────────────────────────────────────┤
+│ 0.00                 │ 221                        │ 1.000                                              │
+│ 0.05                 │ 266                        │ 1.203                                              │
+│ 0.10                 │ 319                        │ 1.443                                              │
+│ 0.15                 │ 397                        │ 1.798                                              │
+│ 0.20                 │ 434                        │ 1.965                                              │
+│ 0.25                 │ 464                        │ 2.101                                              │
+│ 0.30                 │ 516                        │ 2.335                                              │
+│ 0.35                 │ 598                        │ 2.708                                              │
+│ 0.40                 │ 728                        │ 3.295                                              │
+│ 0.45                 │ 779                        │ 3.523                                              │
+│ 0.50                 │ 813                        │ 3.681                                              │
+└──────────────────────┴────────────────────────────┴────────────────────────────────────────────────────┘
+
+Note: The total_transmission_count varible was removed from initksocket after experimentation was done.
+
+7. ADDITIONAL NOTES (BUILD & DEBUG)
+
+7.1 Makefile Usage
+
+The project uses a Makefile to automate compilation and execution.
+
+Available Commands:
+
+┌───────────────┬──────────────────────────────────────────────────────────────┐
+│ Command       │ Description                                                  │
+├───────────────┼──────────────────────────────────────────────────────────────┤
+│ make          │ Builds everything (library + init + user programs)           │
+│ make runinit  │ Initializes shared memory and semaphores (runs initksocket)  │
+│ make runuser  │ Runs one sender (user1) and one receiver (user2)             │
+│ make runuser_3│ Runs 3 senders and 3 receivers with different ports          │
+│ make clean    │ Removes binaries, object files, and outputs                  │
+└───────────────┴──────────────────────────────────────────────────────────────┘
+
+Execution Flow:
+
+1. Run initialization:
+   make runinit
+
+2. Run sender and receiver:
+   make runuser
+
+3. (Optional) Run multiple instances:
+   make runuser_3
+
+Notes:
+- The Makefile automatically builds a static library (libksocket.a).
+- user1 acts as sender, user2 acts as receiver.
+- Multiple instances use incremented ports to avoid conflicts.
+- gnome-terminal is used to spawn separate processes.
+
+7.2 Network Configuration
+
+The following default parameters are defined in the Makefile:
+
+┌────────────┬──────────────┐
+│ Parameter  │ Value        │
+├────────────┼──────────────┤
+│ SRC_IP     │ 127.0.0.1    │
+│ DEST_IP    │ 127.0.0.1    │
+│ SRC_PORT   │ 40111        │
+│ DEST_PORT  │ 40211        │
+└────────────┴──────────────┘
+
+These can be modified directly in the Makefile if needed.
+
+Note: The bind will in lab machines (as theres a 2-3min timeout in LINUX) if port was not closed after usage.
+      To tackle this change the port numbers in makefile when rerunning.
+
+7.3 Debugging Support
+
+The system includes configurable debug logging.
+
+Debug Levels:
+
+┌──────────────┬──────────────────────────────────────────────────────────────┐
+│ Level        │ Description                                                  │
+├──────────────┼──────────────────────────────────────────────────────────────┤
+│ LOG_NONE     │ No logs                                                      │
+│ LOG_MINIMAL  │ Important events (socket creation, send/receive, etc.)       │
+│ LOG_FULLDEBUG│ Detailed logs (packet flow, retransmissions, window updates) │
+└──────────────┴──────────────────────────────────────────────────────────────┘
+
+Usage:
+
+- Debug level is controlled using the DEBUG variable in the source files.
+
+Example:
+    static int DEBUG = 1;
+
+Interpretation:
+    DEBUG = 0 → No logs
+    DEBUG = 1 → Minimal logs
+    DEBUG = 2 → Full debug logs
+
+Logging Macros:
+
+- LOG_MIN(...)   → Printed when DEBUG ≥ LOG_MINIMAL
+- LOG_FULL(...)  → Printed when DEBUG ≥ LOG_FULLDEBUG
+
