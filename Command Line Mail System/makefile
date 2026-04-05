@@ -5,7 +5,7 @@ CFLAGS = -Wall -Wextra -O2 -g
 # Target executables
 TARGETS = smserver smclient
 
-# Default target builds both executables
+# Default target 
 all: $(TARGETS)
 
 # Rule to build the server
@@ -16,9 +16,8 @@ smserver: smserver.c
 smclient: smclient.c
 	$(CC) $(CFLAGS) -o smclient smclient.c
 
-# Clean target to remove compiled binaries
+# Clean target
 clean:
 	rm -f $(TARGETS)
 
-# Phony targets to prevent conflicts with files named 'all' or 'clean'
 .PHONY: all clean

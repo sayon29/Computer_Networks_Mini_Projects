@@ -33,8 +33,11 @@ int read_line(int sock, char *buf, int max_len) {
     int count = 0;
     char c;
     while (count < max_len - 1) {
-        int n = read(sock, &c, 1);
-        if (n <= 0) return -1; // Connection closed or error
+        int n = recv(sock, &c, 1, 0);
+        if (n <= 0){
+            printf("Connection closed by server.\n");
+            exit(0);
+        }
         buf[count++] = c;
         if (c == '\n') break;
     }
@@ -52,7 +55,12 @@ void send_cmd(int sock, const char *fmt, ...) {
     va_end(args);
     
     strcat(buf, "\r\n");
-    write(sock, buf, strlen(buf));
+    int n = send(sock, buf, strlen(buf), 0);
+
+    if(n < 0) {
+        perror("Send failed");
+        exit(1);
+    }
 }
 
 // Connects to the server and returns the socket fd
@@ -88,14 +96,20 @@ void handle_send_mail(int sock) {
     read_line(sock, buf, sizeof(buf)); // Read OK
 
     printf("From (your name): ");
-    fgets(from, sizeof(from), stdin);
+    if(fgets(from, sizeof(from), stdin) == NULL){
+        printf("Input error\n");
+        return;
+    }
     strip_newline(from);
     send_cmd(sock, "FROM %s", from);
     read_line(sock, buf, sizeof(buf)); // Read OK Sender accepted
 
     while (1) {
         printf("To (recipient username, empty line to finish): ");
-        fgets(to, sizeof(to), stdin);
+        if(fgets(to, sizeof(to), stdin) == NULL){
+            printf("Input error\n");
+            return;
+        }
         strip_newline(to);
         
         if (strlen(to) == 0) break; // Empty line finishes recipient input
@@ -118,7 +132,10 @@ void handle_send_mail(int sock) {
     }
 
     printf("Subject: ");
-    fgets(sub, sizeof(sub), stdin);
+    if(fgets(sub, sizeof(sub), stdin) == NULL){
+        printf("Input error\n");
+        return;
+    }
     strip_newline(sub);
     send_cmd(sock, "SUB %s", sub);
     read_line(sock, buf, sizeof(buf)); // Read OK Subject accepted
@@ -129,7 +146,10 @@ void handle_send_mail(int sock) {
 
     while (1) {
         char line[MAX_LINE];
-        fgets(line, sizeof(line), stdin);
+        if(fgets(line, sizeof(line), stdin) == NULL){
+            printf("Input error\n");
+            return;
+        }
         strip_newline(line);
 
         if (strcmp(line, ".") == 0) {
@@ -152,6 +172,73 @@ void handle_send_mail(int sock) {
     read_line(sock, buf, sizeof(buf)); // Read BYE
 }
 
+// SMP Helpers
+void do_list_messages(int sock) {
+    char buf[MAX_LINE];
+    send_cmd(sock, "LIST"); 
+    read_line(sock, buf, sizeof(buf)); // Read OK X messages
+    
+    printf("\n%-5s %-20s %-25s %s\n", "ID", "From", "Subject", "Date");
+    printf("-----------------------------------------------------------------------\n");
+    
+    while (read_line(sock, buf, sizeof(buf)) > 0) {
+        if (strcmp(buf, ".") == 0) break; // Dot-termination
+        char id[10], from[50], sub[100], date[30];
+        sscanf(buf, "%[^\t]\t%[^\t]\t%[^\t]\t%[^\t]", id, from, sub, date); 
+        printf("%-5s %-20s %-25s %s\n", id, from, sub, date);
+    }
+}
+
+void do_read_message(int sock) {
+    char buf[MAX_LINE];
+    char id[10];
+    printf("Enter message ID: ");
+    if(fgets(id, sizeof(id), stdin) == NULL){
+        printf("Input error\n");
+        return;
+    }
+    strip_newline(id);
+
+    send_cmd(sock, "READ %s", id); 
+    read_line(sock, buf, sizeof(buf));
+
+    if (strncmp(buf, "OK", 2) == 0) {
+        printf("\n");
+        while (read_line(sock, buf, sizeof(buf)) > 0) {
+            if (strcmp(buf, ".") == 0) break; // Dot-termination 
+            
+            // Byte un-stuffing
+            if (buf[0] == '.' && buf[1] == '.') {
+                printf("%s\n", buf + 1);
+            } else {
+                printf("%s\n", buf);
+            }
+        }
+    } else {
+        printf("Error: No such message.\n"); 
+    }
+}
+
+void do_delete_message(int sock) {
+    char buf[MAX_LINE];
+    char id[10];
+    printf("Enter message ID: ");
+    if(fgets(id, sizeof(id), stdin) == NULL){
+        printf("Input error\n");
+        return;
+    }
+    strip_newline(id);
+
+    send_cmd(sock, "DELETE %s", id); 
+    read_line(sock, buf, sizeof(buf));
+
+    if (strncmp(buf, "OK", 2) == 0) {
+        printf("Message %s deleted.\n", id); 
+    } else {
+        printf("Error: No such message.\n"); 
+    }
+}
+
 // Checking Mailbox (SMP)
 void handle_mailbox(int sock) {
     char buf[MAX_LINE], nonce[20];
@@ -167,11 +254,17 @@ void handle_mailbox(int sock) {
     // Authentication Loop
     for (int attempts = 0; attempts < 3; attempts++) {
         printf("Username: ");
-        fgets(username, sizeof(username), stdin);
+        if(fgets(username, sizeof(username), stdin) == NULL){
+            printf("Input error\n");
+            return;
+        }
         strip_newline(username);
 
         printf("Password: ");
-        fgets(password, sizeof(password), stdin);
+        if(fgets(password, sizeof(password), stdin) == NULL){
+            printf("Input error\n");
+            return;
+        }
         strip_newline(password);
 
         char auth_str[MAX_LINE];
@@ -209,62 +302,21 @@ void handle_mailbox(int sock) {
         printf("4. Logout\n> ");
         
         char choice[10];
-        fgets(choice, sizeof(choice), stdin);
+        if(fgets(choice, sizeof(choice), stdin) == NULL){
+            printf("Input error\n");
+            return;
+        }
+
         int opt = atoi(choice);
 
         if (opt == 1) {
-            send_cmd(sock, "LIST"); 
-            read_line(sock, buf, sizeof(buf)); // Read OK X messages
-            
-            printf("\n%-5s %-20s %-25s %s\n", "ID", "From", "Subject", "Date");
-            printf("-----------------------------------------------------------------------\n");
-            
-            while (read_line(sock, buf, sizeof(buf)) > 0) {
-                if (strcmp(buf, ".") == 0) break; // Dot-termination
-                char id[10], from[50], sub[100], date[30];
-                sscanf(buf, "%[^\t]\t%[^\t]\t%[^\t]\t%[^\t]", id, from, sub, date); 
-                printf("%-5s %-20s %-25s %s\n", id, from, sub, date);
-            }
+            do_list_messages(sock);
         } 
         else if (opt == 2) {
-            char id[10];
-            printf("Enter message ID: ");
-            fgets(id, sizeof(id), stdin);
-            strip_newline(id);
-
-            send_cmd(sock, "READ %s", id); 
-            read_line(sock, buf, sizeof(buf));
-
-            if (strncmp(buf, "OK", 2) == 0) {
-                printf("\n");
-                while (read_line(sock, buf, sizeof(buf)) > 0) {
-                    if (strcmp(buf, ".") == 0) break; // Dot-termination 
-                    
-                    // Byte un-stuffing
-                    if (buf[0] == '.' && buf[1] == '.') {
-                        printf("%s\n", buf + 1);
-                    } else {
-                        printf("%s\n", buf);
-                    }
-                }
-            } else {
-                printf("Error: No such message.\n"); 
-            }
+            do_read_message(sock);
         } 
         else if (opt == 3) {
-            char id[10];
-            printf("Enter message ID: ");
-            fgets(id, sizeof(id), stdin);
-            strip_newline(id);
-
-            send_cmd(sock, "DELETE %s", id); 
-            read_line(sock, buf, sizeof(buf));
-
-            if (strncmp(buf, "OK", 2) == 0) {
-                printf("Message %s deleted.\n", id); 
-            } else {
-                printf("Error: No such message.\n"); 
-            }
+            do_delete_message(sock);
         } 
         else if (opt == 4) {
             send_cmd(sock, "QUIT"); 

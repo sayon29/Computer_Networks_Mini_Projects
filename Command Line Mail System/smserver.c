@@ -130,7 +130,7 @@ unsigned long djb2(const char *str) {
 void disconnect_client(int i, fd_set *fds) {
     if (clients[i].fd > 0) {
         char msg[100];
-        snprintf(msg, sizeof(msg), "Client disconnected (FD: %d)", clients[i].fd);
+        snprintf(msg, sizeof(msg), "Client disconnected");
         log_event(msg);
         close(clients[i].fd);
         FD_CLR(clients[i].fd, fds);
@@ -138,11 +138,12 @@ void disconnect_client(int i, fd_set *fds) {
     }
 }
 
+// Ensure mailboxes directory and user subdirectories exist, and determine next mail ID for each user
 void ensure_mailboxes() {
     mkdir("mailboxes", 0700);
     for (int i = 0; i < numusers; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "mailboxes/%s", users[i].username);
+        char path[1024];
+        snprintf(path, sizeof(path), "mailboxes/%.*s", MAX_USERNAME_LEN, users[i].username);
         mkdir(path, 0700);
         
         DIR *d = opendir(path);
@@ -189,12 +190,13 @@ int find_user(const char *uname) {
 void deliver_mail(int c_idx) {
     Client *c = &clients[c_idx];
     char date_str[30];
+    char to_str[256] = "";
     time_t now = time(NULL);
     strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
     for (int i = 0; i < c->num_to; i++) {
         int u_idx = c->to_users[i];
-        char filepath[256];
+        char filepath[2500];
         snprintf(filepath, sizeof(filepath), "mailboxes/%s/%d.txt", users[u_idx].username, users[u_idx].nextid++);
         
         FILE *f = fopen(filepath, "w");
@@ -203,6 +205,7 @@ void deliver_mail(int c_idx) {
         fprintf(f, "From: %s\nTo: ", c->from_name);
         for (int j = 0; j < c->num_to; j++) {
             fprintf(f, "%s%s", users[c->to_users[j]].username, j == c->num_to - 1 ? "" : ",");
+            sprintf(to_str + strlen(to_str), "[%s] ", users[c->to_users[j]].username);
         }
         fprintf(f, "\nSubject: %s\nDate: %s\n\n", c->subject, date_str);
         fwrite(c->body, 1, c->body_len, f);
@@ -210,7 +213,7 @@ void deliver_mail(int c_idx) {
     }
     
     char msg[1024];
-    snprintf(msg, sizeof(msg), "Mail delivered from \"%s\" (%d recipients)", c->from_name, c->num_to);
+    snprintf(msg, sizeof(msg), "Mail delivered from %s to %s (%d recipients)", c->from_name, to_str, c->num_to);
     log_event(msg);
 }
 
@@ -235,7 +238,8 @@ void handle_smtp2_command(int i, char *cmd, fd_set *fds) {
             c->to_users[c->num_to++] = u_idx;
             c->state = TO_OR_SUB;
             send_resp(i, "OK Recipient accepted");
-        } else {
+        }
+        else {
             send_resp(i, "ERR No such user");
         }
     } 
@@ -269,6 +273,7 @@ void handle_smp_command(int i, char *cmd, fd_set *fds) {
         return;
     }
 
+    // Authentication Phase
     if (c->state == WAIT_AUTH) {
         char uname[MAX_USERNAME_LEN];
         unsigned long recv_hash;
@@ -296,8 +301,9 @@ void handle_smp_command(int i, char *cmd, fd_set *fds) {
             send_resp(i, "ERR Authentication failed");
         }
     } 
+    // Post-authentication commands
     else if (c->state == SMP_IDLE) {
-        char path[256];
+        char path[1024];
         snprintf(path, sizeof(path), "mailboxes/%s", users[c->user_idx].username);
 
         if (strncmp(cmd, "COUNT", 5) == 0) {
@@ -325,7 +331,7 @@ void handle_smp_command(int i, char *cmd, fd_set *fds) {
                 
                 while ((dir = readdir(d)) != NULL) {
                     if (strstr(dir->d_name, ".txt")) {
-                        char filepath[1024];
+                        char filepath[2500];
                         snprintf(filepath, sizeof(filepath), "%s/%s", path, dir->d_name);
                         FILE *f = fopen(filepath, "r");
                         if (f) {
@@ -348,7 +354,7 @@ void handle_smp_command(int i, char *cmd, fd_set *fds) {
         } 
         else if (strncmp(cmd, "READ ", 5) == 0) {
             int id = atoi(cmd + 5);
-            char filepath[300];
+            char filepath[2500];
             snprintf(filepath, sizeof(filepath), "%s/%d.txt", path, id);
             FILE *f = fopen(filepath, "r");
             if (f) {
@@ -370,7 +376,7 @@ void handle_smp_command(int i, char *cmd, fd_set *fds) {
         } 
         else if (strncmp(cmd, "DELETE ", 7) == 0) {
             int id = atoi(cmd + 7);
-            char filepath[300];
+            char filepath[2500];
             snprintf(filepath, sizeof(filepath), "%s/%d.txt", path, id);
             if (remove(filepath) == 0) {
                 send_resp(i, "OK Deleted");
@@ -391,6 +397,7 @@ void process_line(int i, fd_set *fds) {
     Client *c = &clients[i];
     char *cmd = c->in_buf;
 
+    // Initial MODE selection
     if (c->state == INIT) {
         if (strncmp(cmd, "MODE SEND", 9) == 0) {
             c->mode = 0;
@@ -411,6 +418,7 @@ void process_line(int i, fd_set *fds) {
         return;
     }
 
+    // Middle of SMTP2 body input
     if (c->state == BODY_CONT) {
         if (strcmp(cmd, ".") == 0) {
             deliver_mail(i);
@@ -489,6 +497,7 @@ int main(int argc, char *argv[]) {
         select(max_fd + 1, &readfds, NULL, NULL, &tv);
         time_t now = time(NULL);
 
+        // New Connection
         if (FD_ISSET(listen_fd, &readfds)) {
             while (1) {
                 int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &len);
@@ -510,7 +519,7 @@ int main(int argc, char *argv[]) {
 
                     char ip_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
-                    snprintf(msg, sizeof(msg), "New connection from %s:%d", ip_str, ntohs(client_addr.sin_port));
+                    snprintf(msg, sizeof(msg), "New connection from %s : %d", ip_str, ntohs(client_addr.sin_port));
                     log_event(msg);
 
                     send_resp(ind, "WELCOME SimpleMail v1.0");
@@ -520,6 +529,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        // Existing Clients
         for (int i = 0; i < MAX_CONCURRENT_CLIENTS; i++) {
             if (clients[i].fd == 0) continue;
 
@@ -532,7 +542,7 @@ int main(int argc, char *argv[]) {
 
             if (FD_ISSET(clients[i].fd, &readfds)) {
                 char buf[512];
-                int n = read(clients[i].fd, buf, sizeof(buf));
+                int n = recv(clients[i].fd, buf, sizeof(buf), 0);
                 
                 if (n <= 0) {
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
@@ -549,7 +559,7 @@ int main(int argc, char *argv[]) {
                         }
                         process_line(i, &fds);
                         clients[i].in_len = 0; 
-                    } else if (clients[i].in_len < sizeof(clients[i].in_buf) - 1) {
+                    } else if (clients[i].in_len < (int)sizeof(clients[i].in_buf) - 1) {
                         clients[i].in_buf[clients[i].in_len++] = buf[j];
                     }
                 }
